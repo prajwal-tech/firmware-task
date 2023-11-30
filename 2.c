@@ -1,66 +1,97 @@
 #include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <time.h>
-#include <termios.h>
+#include <stdint.h>
+#include <string.h> // Include string.h for memcpy function
 
-#define UART_PORT "/dev/ttyUSB0"  // Replace with your actual UART port
-#define BAUD_RATE B115200
+// Define UART RX and TX pins
+#define UART_RX_PIN 2
+#define UART_TX_PIN 3
+
+// Define CRC8 polynomial
+const uint8_t crc8_polynomial[8] = {0x07, 0x0B, 0x13, 0x27, 0x4B, 0x95, 0xAF, 0xEF};
+
+// Define EEPROM memory address
+const int eeprom_address = 0;
+
+// Function to calculate CRC8 checksum
+uint8_t calculate_crc8(uint8_t *data, int length) {
+  uint8_t crc = 0x00;
+
+  for (int i = 0; i < length; i++) {
+    uint8_t byte_to_process = data[i];
+
+    for (int j = 0; j < 8; j++) {
+      if ((crc & 0x80) ^ (byte_to_process & 0x80)) {
+        crc = (crc << 1) ^ crc8_polynomial[7];
+        byte_to_process <<= 1;
+      } else {
+        crc <<= 1;
+        byte_to_process <<= 1;
+      }
+    }
+  }
+
+  return crc;
+}
 
 int main() {
-    // Open the UART port
-    struct termios options;
-    int uart_fd = open(UART_PORT, O_RDWR | O_NOCTTY | O_NDELAY);
-    if (uart_fd < 0) {
-        perror("open");
-        exit(1);
+  // Initialize UART communication
+  const char* port_name = "COM1"; // Replace with the actual port name
+  FILE *uart_stream = fopen(port_name, "r+b");
+  if (!uart_stream) {
+    printf("Error opening UART port '%s'\n", port_name);
+    return 1;
+  }
+
+  setvbuf(uart_stream, NULL, _IONBF, 0); // Set unbuffered I/O for UART
+
+  // Initialize EEPROM (simulated)
+  uint8_t eeprom[512]; // Simulated EEPROM memory
+
+  while (1) {
+    // Receive data from PC and store in EEPROM with CRC8 checksum
+    uint8_t data[1024];
+    int length = fread(data, 1, 1024, uart_stream);
+
+    if (length > 0) {
+      // Calculate CRC8 checksum
+      uint8_t checksum = calculate_crc8(data, length);
+
+      // Store data with checksum in EEPROM
+      memcpy(eeprom + eeprom_address, data, length);
+      eeprom[eeprom_address + length] = checksum;
+
+      // Print received data length
+      printf("Received data length: %d\n", length);
     }
 
-    // Configure the UART port
-    tcgetattr(uart_fd, &options);
-    cfsetispeed(&options, BAUD_RATE);
-    cfsetospeed(&options, BAUD_RATE);
-    options.c_cflag |= (CLOCAL | CREAD);
-    options.c_cflag &= ~PARENB;
-    options.c_cflag &= ~CSTOPB;
-    options.c_cflag &= ~CSIZE;
-    options.c_cflag |= CS8;
-    tcsetattr(uart_fd, TCSANOW, &options);
+    // Read data from EEPROM and send to PC
+    if (eeprom[eeprom_address] != 0) {
+      uint8_t data[1024];
+      int length = eeprom[eeprom_address + 1];
 
-    // Define the text to transmit
-    char text[] = "This is the text to transmit.";
+      // Read data from EEPROM
+      memcpy(data, eeprom + eeprom_address, length);
 
-    // Calculate the CRC checksum
-    unsigned long crc = crc32(text, strlen(text));
+      // Verify CRC8 checksum
+      uint8_t checksum = eeprom[eeprom_address + length];
+      uint8_t calculated_checksum = calculate_crc8(data, length);
 
-    // Start the timer
-    clock_t start_time = clock();
+      if (checksum == calculated_checksum) {
+        // Send data to PC
+        fwrite(data, 1, length, uart_stream);
 
-    // Send the text and CRC checksum to the MCU
-    write(uart_fd, text, strlen(text));
-    write(uart_fd, &crc, sizeof(crc));
+        // Print transmitted data length
+        printf("Transmitted data length: %d\n", length);
+      } else {
+        printf("Data corruption detected!\n");
+      }
 
-    // Receive the text and CRC checksum from the MCU
-    char received_text[strlen(text)];
-    unsigned long received_crc;
-    read(uart_fd, received_text, strlen(text));
-    read(uart_fd, &received_crc, sizeof(received_crc));
-
-    // Calculate the CRC checksum of the received text
-    unsigned long received_crc_calculated = crc32(received_text, strlen(received_text));
-
-    // Stop the timer
-    clock_t end_time = clock();
-
-    // Calculate the transmission speed
-    double transmission_speed = strlen(text) / ((end_time - start_time) / (CLOCKS_PER_SEC));
-
-    // Verify the CRC checksum
-    if (received_crc == received_crc_calculated) {
-        printf("Data transmission successful.\n");
-        printf("Transmission speed: %.2f bytes/second\n", transmission_speed);
-    } else {
-        printf("Data transmission failed. CRC checksum mismatch.\n");
+      // Reset EEPROM address
+      eeprom[eeprom_address] = 0;
     }
+  }
 
-    close(uart
+  fclose(uart_stream); // Close UART stream
+
+  return 0;
+}
